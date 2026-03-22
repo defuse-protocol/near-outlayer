@@ -3,24 +3,40 @@ set -e
 
 echo "Building register-contract..."
 
-# Build with LLVM for WASM target (required for ring crate)
-# --no-abi: Don't embed ABI into the contract (prevents deserialization errors)
-# --no-wasmopt: cargo-near's wasm-opt has bulk-memory validation issues
-CC=/opt/homebrew/opt/llvm/bin/clang \
-AR=/opt/homebrew/opt/llvm/bin/llvm-ar \
-cargo near build non-reproducible-wasm --no-abi --no-wasmopt
+# We use raw `cargo build` instead of `cargo near build` because cargo-near
+# overrides RUSTFLAGS with its own value ("-C link-arg=-s") and does not forward
+# CFLAGS to the C compiler, making it impossible to disable bulk-memory ops.
+#
+# RUSTFLAGS:
+#   -C link-arg=-s          Strip debug symbols (same as cargo-near's default)
+#   -C target-feature=-bulk-memory  Disable bulk-memory ops (memory.fill/memory.copy)
+#                                   in rustc codegen. NEAR VM does not support them.
+#
+# CC/AR: Use LLVM 18 instead of LLVM 21. The ring crate compiles C code via clang
+#        for wasm32, and LLVM 21 has a bug where -mno-bulk-memory is accepted but
+#        ignored, still emitting memory.fill instructions.
+#        Install with: brew install llvm@18
+#
+# CFLAGS:
+#   -mno-bulk-memory  Disable bulk-memory ops in clang's C codegen (ring crate).
+#                     Only effective with LLVM 18; LLVM 21 ignores this flag.
+RUSTFLAGS="-C link-arg=-s -C target-feature=-bulk-memory" \
+CC=/opt/homebrew/opt/llvm@18/bin/clang \
+AR=/opt/homebrew/opt/llvm@18/bin/llvm-ar \
+CFLAGS="-mno-bulk-memory" \
+cargo build --target wasm32-unknown-unknown --release
 
-# Create res directory if not exists
 mkdir -p res
 
-# Copy WASM file (without wasm-opt post-processing)
-cp target/near/register_contract.wasm res/register_contract.wasm
+# Lower sign-extension ops (i32.extend8_s etc.) that NEAR VM does not support.
+# Rust 1.86+ emits these by default. wasm-opt rewrites them into portable equivalents.
+# -O also optimizes for size (same as cargo-near's wasm-opt post-step).
+wasm-opt --signext-lowering -O target/wasm32-unknown-unknown/release/register_contract.wasm -o res/register_contract.wasm
 
 # Show file size
 ls -lh res/register_contract.wasm
 
 echo "✅ Build complete: res/register_contract.wasm"
-echo "Note: Built without wasm-opt due to bulk-memory operations in dcap-qvl/ring dependencies"
 
 # near contract deploy worker.outlayer.testnet use-file target/near/register_contract.wasm with-init-call new json-args '{"owner_id": "owner.outlayer.testnet", "init_worker_account": "init-worker.outlayer.testnet"}' prepaid-gas '100.0 Tgas' attached-deposit '0 NEAR' network-config testnet sign-with-keychain send
 # near contract deploy worker.outlayer.testnet use-file res/register_contract.wasm without-init-call network-config testnet sign-with-keychain send

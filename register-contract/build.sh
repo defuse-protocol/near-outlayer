@@ -4,32 +4,33 @@ set -e
 echo "Building register-contract..."
 
 # We use raw `cargo build` instead of `cargo near build` because cargo-near
-# overrides RUSTFLAGS with its own value ("-C link-arg=-s") and does not forward
-# CFLAGS to the C compiler, making it impossible to disable bulk-memory ops.
+# hardcodes RUSTFLAGS="-C link-arg=-s" without -C target-cpu=mvp, and its
+# wasm-opt step doesn't run --signext-lowering.
 #
 # RUSTFLAGS:
-#   -C link-arg=-s          Strip debug symbols (same as cargo-near's default)
-#   -C target-feature=-bulk-memory  Disable bulk-memory ops (memory.fill/memory.copy)
-#                                   in rustc codegen. NEAR VM does not support them.
+#   -C link-arg=-s     Strip debug symbols (same as cargo-near's default)
+#   -C target-cpu=mvp  Emit only WebAssembly MVP instructions — no bulk-memory
+#                      (memory.fill/memory.copy) or sign-extension (i32.extend8_s)
+#                      ops. NEAR VM only supports the MVP spec.
 #
-# CC/AR: Use LLVM 18 instead of LLVM 21. The ring crate compiles C code via clang
-#        for wasm32, and LLVM 21 has a bug where -mno-bulk-memory is accepted but
-#        ignored, still emitting memory.fill instructions.
+# CC/AR: Use LLVM 18 — the ring crate compiles C code via clang for wasm32.
+#        LLVM 21 has issues with -mno-bulk-memory being ignored.
 #        Install with: brew install llvm@18
 #
 # CFLAGS:
-#   -mno-bulk-memory  Disable bulk-memory ops in clang's C codegen (ring crate).
-#                     Only effective with LLVM 18; LLVM 21 ignores this flag.
-RUSTFLAGS="-C link-arg=-s -C target-feature=-bulk-memory" \
+#   -mcpu=mvp  Same as target-cpu=mvp but for clang. Restricts C codegen to
+#              MVP-only instructions.
+RUSTFLAGS="-C link-arg=-s -C target-cpu=mvp" \
 CC=/opt/homebrew/opt/llvm@18/bin/clang \
 AR=/opt/homebrew/opt/llvm@18/bin/llvm-ar \
-CFLAGS="-mno-bulk-memory" \
+CFLAGS="-mcpu=mvp" \
 cargo build --target wasm32-unknown-unknown --release
 
 mkdir -p res
 
-# Lower sign-extension ops (i32.extend8_s etc.) that NEAR VM does not support.
-# Rust 1.86+ emits these by default. wasm-opt rewrites them into portable equivalents.
+# Lower sign-extension ops remaining from Rust's pre-compiled standard library
+# (libcore, liballoc). These are baked into the toolchain's .rlib files and cannot
+# be eliminated by RUSTFLAGS. --signext-lowering rewrites them into MVP equivalents.
 # -O also optimizes for size (same as cargo-near's wasm-opt post-step).
 wasm-opt --signext-lowering -O target/wasm32-unknown-unknown/release/register_contract.wasm -o res/register_contract.wasm
 
